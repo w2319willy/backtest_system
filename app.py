@@ -18,7 +18,7 @@ import streamlit as st
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from data_loader import STOCK_POOL, fetch_local
+from data_loader import STOCK_POOL, fetch_local, get_data
 from engine import BacktestEngine
 from strategies import (buy_and_hold, cross_sectional_momentum,
                         bollinger_reversion, ma_cross)

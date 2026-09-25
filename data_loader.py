@@ -7,7 +7,6 @@
 """
 import os
 import time
-import io
 import datetime as dt
 
 import pandas as pd
