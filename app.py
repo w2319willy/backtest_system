@@ -10,6 +10,7 @@
 支持输入任意A股代码（股票/ETF/指数）：按需联网获取后复权日线并落盘缓存，
 可强制刷新至最新交易日；动量组合支持自定义股票池。
 """
+import json
 import os
 import re
 import sys
@@ -33,6 +34,67 @@ KIND_CN = {"stock": "股票", "etf": "ETF", "index": "指数"}
 KIND_CHOICES = ["自动识别", "股票", "ETF", "指数"]
 CODE_RE = re.compile(r"^\d{6}$")
 DEFAULT_POOL = " ".join(STOCK_POOL)
+
+WATCHLIST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "data", "watchlist.json")
+
+
+# ---------------- 自选股存储（尽力而为落盘，云端只读时降级为会话内有效） ----------------
+def load_watchlist() -> list:
+    try:
+        with open(WATCHLIST_PATH, encoding="utf-8") as f:
+            items = json.load(f)
+        return items if isinstance(items, list) else []
+    except Exception:
+        return []
+
+
+def save_watchlist(items: list) -> bool:
+    try:
+        with open(WATCHLIST_PATH, "w", encoding="utf-8") as f:
+            json.dump(items, f, ensure_ascii=False, indent=1)
+        return True
+    except (OSError, PermissionError):
+        return False
+
+
+if "watchlist" not in st.session_state:
+    st.session_state.watchlist = load_watchlist()
+
+
+def cb_add_watchlist():
+    code = (st.session_state.get("code_input") or "").strip()
+    if not CODE_RE.match(code):
+        st.session_state.watchlist_msg = "请先输入有效的6位代码再加入自选"
+        return
+    items = st.session_state.watchlist
+    if any(it["code"] == code for it in items):
+        st.session_state.watchlist_msg = f"{code} 已在自选中"
+        return
+    kind = infer_kind(code, st.session_state.get("kind_choice", "自动识别"))
+    name = fetch_name(code, kind)
+    items.append({"code": code, "kind": kind, "name": name})
+    st.session_state.watchlist = items
+    saved = save_watchlist(items)
+    st.session_state.watchlist_msg = (f"已加入自选：{name}({code})"
+                                      + ("" if saved else "（当前文件系统只读，仅本次会话有效）"))
+
+
+def cb_use_code(code: str):
+    st.session_state.code_input = code
+    st.session_state.watchlist_msg = f"已切换到自选标的 {code}"
+
+
+def cb_remove_watchlist(code: str):
+    st.session_state.watchlist = [it for it in st.session_state.watchlist
+                                  if it["code"] != code]
+    save_watchlist(st.session_state.watchlist)
+    st.session_state.watchlist_msg = f"已从自选移除 {code}"
+
+
+def cb_fill_pool():
+    st.session_state.pool_text = " ".join(it["code"] for it in st.session_state.watchlist)
+    st.session_state.watchlist_msg = "已把自选股填入股票池"
 
 
 def infer_kind(code: str, choice: str) -> str:
@@ -190,10 +252,11 @@ mode = st.sidebar.radio("回测模式", ["单标的策略", "动量组合（自�
 
 if mode == "单标的策略":
     c1, c2 = st.sidebar.columns([1.2, 1])
-    code = c1.text_input("证券代码（6位）", value="510300",
+    code = c1.text_input("证券代码（6位）", value="510300", key="code_input",
                          help="示例：600519贵州茅台、510300沪深300ETF；指数（如000300上证指数、399006创业板指）请把类型选为“指数”")
-    kind_choice = c2.selectbox("品种类型", KIND_CHOICES)
+    kind_choice = c2.selectbox("品种类型", KIND_CHOICES, key="kind_choice")
     code = code.strip()
+    st.sidebar.button("⭐ 加入自选", on_click=cb_add_watchlist, use_container_width=True)
     if not CODE_RE.match(code):
         st.sidebar.error("请输入6位数字代码，例如 600519")
         st.stop()
@@ -219,12 +282,30 @@ else:
     code, kind = None, None
     strategy = "横截面动量"
     pool_text = st.sidebar.text_area("股票池代码（6位，空格/逗号分隔）", value=DEFAULT_POOL,
+                                     key="pool_text",
                                      help="可输入任意A股代码，获取失败的标的将被自动跳过；建议至少5只")
     c1, c2 = st.sidebar.columns(2)
     lookback = c1.slider("动量回看期", 10, 60, 20)
     top = c2.slider("持有只数", 1, 5, 3)
     params = (lookback, top)
     st.sidebar.caption(f"每月末按过去{lookback}日收益排序，等权持有最强{top}只")
+
+# ---------------- 自选股 ----------------
+st.sidebar.subheader("⭐ 自选股")
+if not st.session_state.watchlist:
+    st.sidebar.caption("暂无自选。单标的模式下点击「⭐ 加入自选」可收藏常用标的。")
+for i, it in enumerate(st.session_state.watchlist):
+    c1, c2, c3 = st.sidebar.columns([3.2, 1, 1])
+    c1.caption(f"{it['name'][:8]}({it['code']})")
+    c2.button("用", key=f"wl_use_{it['code']}", on_click=cb_use_code,
+              args=(it["code"],), use_container_width=True)
+    c3.button("✕", key=f"wl_del_{it['code']}", on_click=cb_remove_watchlist,
+              args=(it["code"],), use_container_width=True)
+if st.session_state.watchlist and mode == "动量组合（自选股票池）":
+    st.sidebar.button("⬇ 填充到股票池", key="wl_fill", on_click=cb_fill_pool,
+                      use_container_width=True)
+if st.session_state.get("watchlist_msg"):
+    st.sidebar.caption(st.session_state.watchlist_msg)
 
 st.sidebar.divider()
 st.sidebar.subheader("交易成本与资金")
