@@ -71,6 +71,18 @@ def fetch_akshare_index(symbol: str, start: str = START, end: str = END) -> pd.D
     return _clean(df)
 
 
+def fetch_sina_index(symbol: str, start: str = START, end: str = END) -> pd.DataFrame:
+    """新浪指数日线备用源（东财接口被限流/阻断时使用），指数无需复权"""
+    import akshare as ak
+    prefix = "sz" if symbol.startswith("399") else "sh"
+    df = ak.stock_zh_index_daily(symbol=prefix + symbol)
+    df = _clean(df)
+    if len(df):
+        df = df.loc[:end]
+        df = df.loc[df.index >= pd.Timestamp(start)]
+    return df
+
+
 def _yahoo(symbol: str, start: str = START, end: str = END) -> pd.DataFrame:
     """Yahoo Finance chart 接口（无需鉴权），用于 akshare 失败时的备用数据源"""
     ysym = {"510300": "510300.SS", "000300": "000300.SS"}.get(
@@ -131,14 +143,18 @@ def get_data(symbol: str, kind: str = "stock", use_cache: bool = True) -> pd.Dat
     elif kind == "etf":
         attempts = [lambda: fetch_akshare_etf(symbol)]
     elif kind == "index":
-        attempts = [lambda: fetch_akshare_index(symbol)]
+        attempts = [lambda: fetch_akshare_index(symbol),
+                    lambda: fetch_sina_index(symbol)]
     attempts.append(lambda: _yahoo(symbol))
     last_err = None
     for fn in attempts:
         try:
             df = _with_retry(fn)
             if len(df) > 200:
-                df.to_csv(os.path.join(DATA_DIR, f"{symbol}.csv"))
+                try:                      # 云端只读文件系统下跳过落盘，仅内存缓存
+                    df.to_csv(os.path.join(DATA_DIR, f"{symbol}.csv"))
+                except (OSError, PermissionError):
+                    pass
                 time.sleep(1.5)          # 接口限速保护
                 return df
         except Exception as e:            # 换下一个数据源

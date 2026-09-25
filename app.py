@@ -7,8 +7,11 @@
 浏览器访问 http://localhost:8501
 
 界面仅做参数收集与结果呈现，回测计算完全复用 engine/strategies/performance 模块。
+支持输入任意A股代码（股票/ETF/指数）：按需联网获取后复权日线并落盘缓存，
+可强制刷新至最新交易日；动量组合支持自定义股票池。
 """
 import os
+import re
 import sys
 import datetime as dt
 
@@ -18,7 +21,7 @@ import streamlit as st
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from data_loader import STOCK_POOL, fetch_local, get_data
+from data_loader import STOCK_POOL, get_data
 from engine import BacktestEngine
 from strategies import (buy_and_hold, cross_sectional_momentum,
                         bollinger_reversion, ma_cross)
@@ -26,31 +29,84 @@ import performance as perf
 
 st.set_page_config(page_title="量化交易策略回测系统", page_icon="📈", layout="wide")
 
-ASSET_NAMES = {"510300": "沪深300ETF", **{k: f"{v}({k})" for k, v in STOCK_POOL.items()}}
+KIND_CN = {"stock": "股票", "etf": "ETF", "index": "指数"}
+KIND_CHOICES = ["自动识别", "股票", "ETF", "指数"]
+CODE_RE = re.compile(r"^\d{6}$")
+DEFAULT_POOL = " ".join(STOCK_POOL)
+
+
+def infer_kind(code: str, choice: str) -> str:
+    """由品种选择与代码前缀推断数据类别：5/1开头为ETF，其余默认股票；指数需显式选择"""
+    if choice != "自动识别":
+        return {"股票": "stock", "ETF": "etf", "指数": "index"}[choice]
+    return "etf" if code.startswith(("5", "1")) else "stock"
+
+
+def _sina_name(code: str, kind: str) -> str:
+    """新浪行情接口查证券简称（东财名称接口不可用时的备用通道）"""
+    import urllib.request
+    if kind == "index":
+        sym = ("s_sz" if code.startswith("399") else "s_sh") + code
+    else:
+        sym = ("sh" if code.startswith(("6", "5")) else "sz") + code
+    req = urllib.request.Request(f"https://hq.sinajs.cn/list={sym}",
+                                 headers={"Referer": "https://finance.sina.com.cn"})
+    data = urllib.request.urlopen(req, timeout=8).read().decode("gbk")
+    payload = data.split('"')[1]
+    return payload.split(",")[0] if payload else ""
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_name(code: str, kind: str) -> str:
+    """查询证券简称（尽力而为：东财接口→新浪接口→退回代码本身）"""
+    try:
+        import akshare as ak
+        if kind == "stock":
+            info = ak.stock_individual_info_em(symbol=code)
+            d = dict(zip(info["item"], info["value"]))
+            name = str(d.get("股票简称", ""))
+            if name:
+                return name
+        elif kind == "etf":
+            lst = ak.fund_etf_spot_em()
+            row = lst[lst["代码"] == code]
+            if len(row):
+                return str(row.iloc[0]["名称"])
+        elif kind == "index":
+            lst = ak.stock_zh_index_spot_em(symbol="沪深重要指数")
+            row = lst[lst["代码"] == code]
+            if len(row):
+                return str(row.iloc[0]["名称"])
+    except Exception:
+        pass
+    try:
+        name = _sina_name(code, kind)
+        if name:
+            return name
+    except Exception:
+        pass
+    return code
+
+
+@st.cache_data(show_spinner="正在获取行情数据...")
+def load_price(symbol: str, kind: str, refresh: bool = False) -> pd.DataFrame:
+    return get_data(symbol, kind=kind, use_cache=not refresh)
 
 
 # ---------------- 数据与回测（带缓存） ----------------
-@st.cache_data(show_spinner="正在加载行情数据...")
-def load_price(symbol: str) -> pd.DataFrame:
-    df = fetch_local(symbol)
-    if df is None:
-        df = get_data(symbol, kind="etf" if symbol == "510300" else "stock")
-    return df
-
-
 @st.cache_data(show_spinner="正在回测...")
-def run_backtest(symbol: str, strategy: str, params: tuple,
+def run_backtest(symbol: str, kind: str, strategy: str, params: tuple,
                  commission: float, stamp: float, slippage: float,
-                 cash0: float, start: str, end: str) -> dict:
-    df = load_price(symbol).loc[start:end]
+                 cash0: float, start: str, end: str, refresh: bool = False) -> dict:
+    df = load_price(symbol, kind, refresh).loc[start:end]
     if len(df) < 60:
-        raise ValueError("所选区间数据不足（不足60个交易日）")
+        raise ValueError("所选区间数据不足（不足60个交易日），请检查代码或调整区间")
     dates = df.index
-    is_stock = symbol != "510300"
     open_ = df[["open"]].rename(columns={"open": "asset"})
     close = df[["close"]].rename(columns={"close": "asset"})
+    # 印花税仅对股票征收；ETF/指数不缴
     eng = BacktestEngine(open_, close, commission, stamp, slippage,
-                         tradable={"asset": is_stock}, initial_cash=cash0)
+                         tradable={"asset": kind == "stock"}, initial_cash=cash0)
 
     if strategy == "双均线趋势跟踪":
         fast, slow = params
@@ -68,28 +124,45 @@ def run_backtest(symbol: str, strategy: str, params: tuple,
     res = eng.run(w)
     # 基准：同标的买入持有（相同成本口径）
     res["bench"] = eng.run(buy_and_hold(["asset"], dates))
+    res["actual_start"] = dates[0]
+    res["actual_end"] = dates[-1]
+    res["n_days"] = len(dates)
     return res
 
 
-@st.cache_data(show_spinner="正在回测动量组合...")
-def run_momentum(params: tuple, commission: float, stamp: float,
-                 slippage: float, cash0: float, start: str, end: str) -> dict:
-    lookback, top = params
-    pool = {}
-    for s in STOCK_POOL:
-        df = load_price(s).loc[start:end]
-        pool[s] = df
-    etf = load_price("510300").loc[start:end]     # 与离线实验一致：对齐ETF交易日
-    common = etf.index
+@st.cache_data(show_spinner="正在获取股票池行情并回测...")
+def run_momentum(pool_text: str, params: tuple, commission: float, stamp: float,
+                 slippage: float, cash0: float, start: str, end: str,
+                 refresh: bool = False) -> dict:
+    codes = list(dict.fromkeys(re.findall(r"\d{6}", pool_text)))
+    if len(codes) < 3:
+        raise ValueError("股票池至少需要3个有效的6位代码")
+    pool, skipped = {}, []
+    for c in codes:
+        kind = infer_kind(c, "自动识别")
+        try:
+            pool[c] = load_price(c, kind, refresh).loc[start:end]
+        except Exception:
+            skipped.append(c)
+    if len(pool) < 3:
+        raise ValueError(f"有效标的不足3个（失败：{'、'.join(skipped) or '无'}），无法构建股票池")
+    common = None
     for df in pool.values():
-        common = common.intersection(df.index)
+        common = df.index if common is None else common.intersection(df.index)
     pc = pd.DataFrame({s: pool[s]["close"].reindex(common) for s in pool})
     po = pd.DataFrame({s: pool[s]["open"].reindex(common) for s in pool})
     eng = BacktestEngine(po, pc, commission, stamp, slippage,
-                         tradable={s: True for s in pc}, initial_cash=cash0)
-    sig = cross_sectional_momentum(pc, int(lookback), int(top), "M")
+                         tradable={s: infer_kind(s, "自动识别") == "stock" for s in pc},
+                         initial_cash=cash0)
+    lookback, top = params
+    sig = cross_sectional_momentum(pc, lookback, top, "M")
     res = eng.run(sig)
     res["bench"] = eng.run(buy_and_hold(list(pc.columns), pc.index))
+    res["skipped"] = skipped
+    res["pool_size"] = len(pc.columns)
+    res["actual_start"] = common[0]
+    res["actual_end"] = common[-1]
+    res["n_days"] = len(common)
     return res
 
 
@@ -113,11 +186,18 @@ def fmt_num(x, nd=2):
 # ---------------- 侧边栏：参数 ----------------
 st.sidebar.title("⚙️ 回测设置")
 
-mode = st.sidebar.radio("回测模式", ["单标的策略", "动量组合（10股池）"], horizontal=True)
+mode = st.sidebar.radio("回测模式", ["单标的策略", "动量组合（自选股票池）"], horizontal=True)
 
 if mode == "单标的策略":
-    symbol = st.sidebar.selectbox("选择标的", list(ASSET_NAMES),
-                                  format_func=lambda s: ASSET_NAMES[s])
+    c1, c2 = st.sidebar.columns([1.2, 1])
+    code = c1.text_input("证券代码（6位）", value="510300",
+                         help="示例：600519贵州茅台、510300沪深300ETF；指数（如000300上证指数、399006创业板指）请把类型选为“指数”")
+    kind_choice = c2.selectbox("品种类型", KIND_CHOICES)
+    code = code.strip()
+    if not CODE_RE.match(code):
+        st.sidebar.error("请输入6位数字代码，例如 600519")
+        st.stop()
+    kind = infer_kind(code, kind_choice)
     strategy = st.sidebar.selectbox("选择策略", ["双均线趋势跟踪", "布林带均值回归", "买入持有基准"])
     if strategy == "双均线趋势跟踪":
         c1, c2 = st.sidebar.columns(2)
@@ -136,8 +216,10 @@ if mode == "单标的策略":
     else:
         params = ()
 else:
-    symbol = None
+    code, kind = None, None
     strategy = "横截面动量"
+    pool_text = st.sidebar.text_area("股票池代码（6位，空格/逗号分隔）", value=DEFAULT_POOL,
+                                     help="可输入任意A股代码，获取失败的标的将被自动跳过；建议至少5只")
     c1, c2 = st.sidebar.columns(2)
     lookback = c1.slider("动量回看期", 10, 60, 20)
     top = c2.slider("持有只数", 1, 5, 3)
@@ -153,13 +235,15 @@ cash0 = st.sidebar.select_slider("初始资金（元）", [100_000, 500_000, 1_0
                                  value=1_000_000)
 
 st.sidebar.subheader("回测区间")
-data_min = dt.date(2019, 1, 2)
-data_max = dt.date(2026, 9, 24)
 c1, c2 = st.sidebar.columns(2)
-start_date = c1.date_input("开始", dt.date(2019, 1, 2), min_value=data_min, max_value=data_max)
-end_date = c2.date_input("结束", data_max, min_value=data_min, max_value=data_max)
+start_date = c1.date_input("开始", dt.date(2019, 1, 2),
+                           min_value=dt.date(2015, 1, 1), max_value=dt.date.today())
+end_date = c2.date_input("结束", dt.date.today(),
+                         min_value=dt.date(2015, 1, 1), max_value=dt.date.today())
 oos_date = st.sidebar.date_input("样本外起点（IS/OOS分界）", dt.date(2024, 1, 1),
-                                 min_value=data_min, max_value=data_max)
+                                 min_value=dt.date(2015, 1, 1), max_value=dt.date.today())
+refresh = st.sidebar.checkbox("强制刷新行情", value=False,
+                              help="勾选后忽略本地缓存，重新联网下载该代码的最新日线数据")
 
 run_clicked = st.sidebar.button("🚀 运行回测", type="primary", use_container_width=True)
 st.sidebar.divider()
@@ -168,29 +252,38 @@ st.sidebar.caption("撮合规则：T日收盘产生信号，T+1日开盘价成�
 
 # ---------------- 主区域 ----------------
 st.title("📈 基于Python的量化交易策略回测系统")
-st.caption("华南理工大学辅修学士学位毕业设计 · 数据层—引擎层—策略层—评估层")
+st.caption("华南理工大学辅修学士学位毕业设计 · 数据层—引擎层—策略层—评估层 · "
+           "支持任意A股代码按需获取")
 
 if not run_clicked:
-    st.info("请在左侧设置参数后，点击「🚀 运行回测」。")
+    st.info("请在左侧设置参数后，点击「🚀 运行回测」。输入任意6位A股代码即可联网获取行情。")
     st.stop()
 
 try:
     if mode == "单标的策略":
-        res = run_backtest(symbol, strategy, params, commission, stamp,
-                           slippage, float(cash0), str(start_date), str(end_date))
-        title_asset = ASSET_NAMES[symbol]
+        res = run_backtest(code, kind, strategy, params, commission, stamp,
+                           slippage, float(cash0), str(start_date), str(end_date),
+                           refresh)
+        name = fetch_name(code, kind) if not refresh else fetch_name(code, kind)
+        title_asset = f"{name}({code})｜{KIND_CN[kind]}"
     else:
-        res = run_momentum(params, commission, stamp, slippage,
-                           float(cash0), str(start_date), str(end_date))
-        title_asset = "10只大市值股票池"
+        res = run_momentum(pool_text, params, commission, stamp, slippage,
+                           float(cash0), str(start_date), str(end_date), refresh)
+        title_asset = f"自选股票池（有效{res['pool_size']}只）"
 except Exception as e:
     st.error(f"回测失败：{e}")
+    st.caption("提示：请检查证券代码是否正确；指数代码（如000300、399006）需把品种类型选为“指数”；"
+               "新代码首次获取需要联网，约需数秒。")
     st.stop()
 
 nav = res["nav"].dropna()
 bench_nav = res["bench"]["nav"].reindex(nav.index).dropna()
 bench_label = "买入持有" if mode == "单标的策略" else "股票池等权持有"
 oos_ts = pd.Timestamp(oos_date) if start_date < oos_date < end_date else None
+
+st.caption(f"标的：{title_asset}｜实际区间：{res['actual_start'].date()} ~ "
+           f"{res['actual_end'].date()}（{res['n_days']}个交易日）"
+           + (f"｜跳过无法获取：{'、'.join(res['skipped'])}" if res.get("skipped") else ""))
 
 # 指标卡片
 stats_all = perf.segment_stats(nav)
@@ -205,7 +298,7 @@ cols[5].metric("总交易成本", f"{res['total_cost']:,.0f} 元")
 
 st.divider()
 
-# 净值对比（策略 vs 买入持有）
+# 净值对比（策略 vs 基准）
 tab1, tab2, tab3, tab4 = st.tabs(["📊 净值与回撤", "🧾 交易明细", "📋 绩效分段表", "⬇️ 数据导出"])
 
 with tab1:
@@ -251,7 +344,7 @@ with tab3:
     st.caption(f"当前设置：{title_asset}｜{strategy}｜无风险利率取0，一年按252个交易日计。")
 
 with tab4:
-    nav_df = pd.DataFrame({"策略净值": nav, "买入持有": bench_nav})
+    nav_df = pd.DataFrame({"策略净值": nav, bench_label: bench_nav})
     st.download_button("下载净值序列 (CSV)", nav_df.to_csv(encoding="utf-8-sig").encode("utf-8"),
                        file_name="backtest_nav.csv", mime="text/csv")
     tr = res["trades"][["cash", "nav", "traded", "cost", "n_pos"]].round(2)
@@ -261,7 +354,8 @@ with tab4:
     report = [
         f"回测报告  {dt.datetime.now():%Y-%m-%d %H:%M}",
         f"标的：{title_asset}    策略：{strategy}    参数：{params}",
-        f"区间：{start_date} ~ {end_date}    样本外起点：{oos_date}",
+        f"区间：{res['actual_start'].date()} ~ {res['actual_end'].date()}（{res['n_days']}个交易日）"
+        f"    样本外起点：{oos_date}",
         f"成本：佣金{commission * 10000:.1f}‱ / 印花税{stamp * 10000:.1f}‱ / 滑点{slippage * 10000:.1f}‱    初始资金：{cash0:,.0f}元",
         "",
         f"全样本：年化 {fmt_pct(stats_all.get('年化收益率'))}，夏普 {fmt_num(stats_all.get('夏普比率'))}，"
