@@ -209,16 +209,16 @@ st.divider()
 tab1, tab2, tab3, tab4 = st.tabs(["📊 净值与回撤", "🧾 交易明细", "📋 绩效分段表", "⬇️ 数据导出"])
 
 with tab1:
+    st.caption(("归一化净值（期初=1）。样本外起点：%s。" % oos_date) if oos_ts
+               else "归一化净值（期初=1）。")
     comp = pd.DataFrame({
         "策略净值": nav / nav.iloc[0],
         bench_label: bench_nav / bench_nav.iloc[0],
     })
     st.line_chart(comp, height=320)
-    if oos_ts:
-        st.caption(f"虚线参考：样本外起点 {oos_date}。上图为归一化净值（期初=1）。")
+    st.caption("策略回撤曲线（净值相对历史新高的跌幅）。")
     dd = (nav / nav.cummax() - 1)
     st.area_chart(dd, height=220)
-    st.caption("下图为策略回撤曲线（净值相对历史新高的跌幅）。")
 
 with tab2:
     trades = res["trades"].copy()
