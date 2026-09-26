@@ -199,7 +199,8 @@ def run_backtest(symbol: str, kind: str, strategy: str, params: tuple,
 @st.cache_data(show_spinner="正在获取股票池行情并回测...")
 def run_momentum(pool_text: str, params: tuple, commission: float, stamp: float,
                  slippage: float, cash0: float, start: str, end: str,
-                 refresh: bool = False) -> dict:
+                 refresh: bool = False, vol_target: bool = False,
+                 target_vol: float = 0.15) -> dict:
     codes = list(dict.fromkeys(re.findall(r"\d{6}", pool_text)))
     if len(codes) < 3:
         raise ValueError("股票池至少需要3个有效的6位代码")
@@ -222,6 +223,10 @@ def run_momentum(pool_text: str, params: tuple, commission: float, stamp: float,
                          initial_cash=cash0)
     lookback, top = params
     sig = cross_sectional_momentum(pc, lookback, top, "M")
+    if vol_target:      # 波动率目标仓位：以股票池等权组合的已实现波动率缩放总敞口
+        eq_close = (pc.pct_change().fillna(0).mean(axis=1) + 1).cumprod()
+        scale = vol_target_scale(eq_close, target_vol).reindex(common).fillna(0.0)
+        sig = sig.mul(scale, axis=0)
     res = eng.run(sig)
     res["bench"] = eng.run(buy_and_hold(list(pc.columns), pc.index))
     res["skipped"] = skipped
@@ -282,12 +287,6 @@ if mode == "单标的策略":
         st.sidebar.caption(f"当前参数：布林带({n}, {k}σ)，跌破下轨买入、回升中轨卖出")
     else:
         params = ()
-    vol_on = st.sidebar.checkbox("启用波动率目标仓位", value=False,
-                                 help="仓位系数=目标年化波动率÷近20日实际波动率（按0.1步长分档、上限100%）；波动放大时自动减仓")
-    target_vol = 0.15
-    if vol_on:
-        target_vol = st.sidebar.slider("目标年化波动率", 0.05, 0.40, 0.15, 0.01)
-        st.sidebar.caption(f"仓位系数 = {target_vol:.0%} ÷ 近20日实际年化波动率，按0.1步长分档")
 else:
     code, kind = None, None
     strategy = "横截面动量"
@@ -299,6 +298,15 @@ else:
     top = c2.slider("持有只数", 1, 5, 3)
     params = (lookback, top)
     st.sidebar.caption(f"每月末按过去{lookback}日收益排序，等权持有最强{top}只")
+
+# ---------------- 仓位控制（两种模式通用） ----------------
+vol_on = st.sidebar.checkbox("启用波动率目标仓位", value=False,
+                             help="仓位系数=目标年化波动率÷近20日实际波动率（按0.1步长分档、上限100%）；波动放大时自动减仓。"
+                                  "动量组合以股票池等权组合的波动率作为整体风险估计")
+target_vol = 0.15
+if vol_on:
+    target_vol = st.sidebar.slider("目标年化波动率", 0.05, 0.40, 0.15, 0.01)
+    st.sidebar.caption(f"仓位系数 = {target_vol:.0%} ÷ 近20日实际波动率，按0.1步长分档")
 
 # ---------------- 自选股 ----------------
 st.sidebar.subheader("⭐ 自选股")
@@ -361,8 +369,11 @@ try:
             title_asset += f"｜波动率目标{target_vol:.0%}"
     else:
         res = run_momentum(pool_text, params, commission, stamp, slippage,
-                           float(cash0), str(start_date), str(end_date), refresh)
+                           float(cash0), str(start_date), str(end_date), refresh,
+                           vol_on, target_vol)
         title_asset = f"自选股票池（有效{res['pool_size']}只）"
+        if vol_on:
+            title_asset += f"｜波动率目标{target_vol:.0%}"
 except Exception as e:
     st.error(f"回测失败：{e}")
     st.caption("提示：请检查证券代码是否正确；指数代码（如000300、399006）需把品种类型选为“指数”；"

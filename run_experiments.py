@@ -169,9 +169,16 @@ def main():
     scale = vol_target_scale(etf_raw["close"], TV).reindex(etf_raw.index).fillna(0.0)
     sig_vt = w_base.mul(scale, axis=0)
     res_vt = run_single("双均线+波动率目标", sig_vt, etf_raw)
+    # 动量组合的波动率目标：以股票池等权组合的已实现波动率作为整体风险估计
+    eq_close = (pool_close.pct_change().fillna(0).mean(axis=1) + 1).cumprod()
+    scale_pool = vol_target_scale(eq_close, TV).reindex(common_idx).fillna(0.0)
+    sig_mom_vt = sig_mom.mul(scale_pool, axis=0)
+    res_mom_vt = eng_mom.run(sig_mom_vt)
+    res_mom_vt["name"] = "动量Top3+波动率目标"
     vol_rows = []
     for name, r in [("满仓双均线", res_ma), ("波动率目标双均线(15%)", res_vt),
-                    ("买入持有基准", res_bh)]:
+                    ("买入持有基准", res_bh),
+                    ("满仓动量Top3", res_mom), ("波动率目标动量Top3(15%)", res_mom_vt)]:
         for tag, nav in [("全样本", r["nav"]), ("样本内", r["nav"].loc[:OOS_START]),
                          ("样本外", r["nav"].loc[OOS_START:])]:
             s = perf.segment_stats(nav)
@@ -189,6 +196,11 @@ def main():
                    "买入持有基准": res_bh["nav"]},
                   "波动率目标仓位的效果（全样本，期初=1）",
                   os.path.join(RESULTS, "fig5_5_nav_voltarget.png"), OOS_START)
+    perf.plot_nav({"满仓动量Top3": res_mom["nav"],
+                   "波动率目标动量Top3": res_mom_vt["nav"],
+                   "股票池等权持有": res_poolbh["nav"]},
+                  "动量组合波动率目标仓位的效果（全样本，期初=1）",
+                  os.path.join(RESULTS, "fig5_6_nav_mom_vt.png"), OOS_START)
 
     # 净值序列存档
     pd.DataFrame({"双均线": res_ma["nav"], "均值回归": res_boll["nav"],
