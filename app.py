@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from data_loader import STOCK_POOL, get_data
 from engine import BacktestEngine
 from strategies import (buy_and_hold, cross_sectional_momentum,
-                        bollinger_reversion, ma_cross)
+                        bollinger_reversion, ma_cross, vol_target_scale)
 import performance as perf
 
 st.set_page_config(page_title="量化交易策略回测系统", page_icon="📈", layout="wide")
@@ -159,7 +159,8 @@ def load_price(symbol: str, kind: str, refresh: bool = False) -> pd.DataFrame:
 @st.cache_data(show_spinner="正在回测...")
 def run_backtest(symbol: str, kind: str, strategy: str, params: tuple,
                  commission: float, stamp: float, slippage: float,
-                 cash0: float, start: str, end: str, refresh: bool = False) -> dict:
+                 cash0: float, start: str, end: str, refresh: bool = False,
+                 vol_target: bool = False, target_vol: float = 0.15) -> dict:
     df = load_price(symbol, kind, refresh).loc[start:end]
     if len(df) < 60:
         raise ValueError("所选区间数据不足（不足60个交易日），请检查代码或调整区间")
@@ -183,6 +184,9 @@ def run_backtest(symbol: str, kind: str, strategy: str, params: tuple,
     else:
         raise ValueError("单标的模式不支持该策略")
     w = sig.reindex(dates).fillna(0.0)
+    if vol_target:      # 波动率目标仓位：基础信号 × 仓位系数
+        scale = vol_target_scale(df["close"], target_vol).reindex(dates).fillna(0.0)
+        w = w.mul(scale, axis=0)
     res = eng.run(w)
     # 基准：同标的买入持有（相同成本口径）
     res["bench"] = eng.run(buy_and_hold(["asset"], dates))
@@ -278,6 +282,12 @@ if mode == "单标的策略":
         st.sidebar.caption(f"当前参数：布林带({n}, {k}σ)，跌破下轨买入、回升中轨卖出")
     else:
         params = ()
+    vol_on = st.sidebar.checkbox("启用波动率目标仓位", value=False,
+                                 help="仓位系数=目标年化波动率÷近20日实际波动率（按0.1步长分档、上限100%）；波动放大时自动减仓")
+    target_vol = 0.15
+    if vol_on:
+        target_vol = st.sidebar.slider("目标年化波动率", 0.05, 0.40, 0.15, 0.01)
+        st.sidebar.caption(f"仓位系数 = {target_vol:.0%} ÷ 近20日实际年化波动率，按0.1步长分档")
 else:
     code, kind = None, None
     strategy = "横截面动量"
@@ -344,9 +354,11 @@ try:
     if mode == "单标的策略":
         res = run_backtest(code, kind, strategy, params, commission, stamp,
                            slippage, float(cash0), str(start_date), str(end_date),
-                           refresh)
+                           refresh, vol_on, target_vol)
         name = fetch_name(code, kind) if not refresh else fetch_name(code, kind)
         title_asset = f"{name}({code})｜{KIND_CN[kind]}"
+        if vol_on:
+            title_asset += f"｜波动率目标{target_vol:.0%}"
     else:
         res = run_momentum(pool_text, params, commission, stamp, slippage,
                            float(cash0), str(start_date), str(end_date), refresh)

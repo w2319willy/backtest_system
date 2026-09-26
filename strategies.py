@@ -56,3 +56,22 @@ def cross_sectional_momentum(pool_close: pd.DataFrame, lookback: int = 20,
         for a in cur:
             w.loc[t, a] = 1.0 / top
     return w
+
+
+def vol_target_scale(close: pd.Series, target_vol: float = 0.15,
+                     lookback: int = 20, cap: float = 1.0,
+                     step: float = 0.1) -> pd.Series:
+    """波动率目标仓位系数（Moreira & Muir, 2017）
+
+    系数 = min(cap, 目标年化波动率 / 过去lookback日已实现年化波动率)，
+    仅使用截至T日收盘的收益数据（由引擎在T+1开盘撮合）；
+    按 step 步长离散化以避免频繁微调造成的换手；
+    波动率估计不足（前lookback日）时不持仓（系数为0）。
+    """
+    ret = close.pct_change()
+    realized = ret.rolling(lookback, min_periods=lookback).std(ddof=0) * np.sqrt(252)
+    scale = target_vol / realized
+    scale = scale.clip(lower=0.0, upper=cap)
+    if step:
+        scale = (scale / step).round().mul(step).round(2)
+    return scale.fillna(0.0)
