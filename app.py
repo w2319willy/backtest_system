@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
-"""量化交易策略回测系统 - Web交互界面（Streamlit）
+"""量化交易策略回测系统 - Web交互界面（Streamlit · 专业金融视觉版）
 
 运行方式：
     cd 回测系统
-    python -m streamlit run app.py --server.port 8501
+    D:\\python\\python.exe -m streamlit run app.py --server.port 8501
 浏览器访问 http://localhost:8501
 
 界面仅做参数收集与结果呈现，回测计算完全复用 engine/strategies/performance 模块。
 支持输入任意A股代码（股票/ETF/指数）：按需联网获取后复权日线并落盘缓存，
-可强制刷新至最新交易日；动量组合支持自定义股票池。
+可强制刷新至最新交易日；动量组合支持自定义股票池；波动率目标仓位两种模式通用。
 """
 import json
 import os
@@ -19,6 +19,7 @@ import datetime as dt
 import numpy as np
 import pandas as pd
 import streamlit as st
+import plotly.graph_objects as go
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -28,7 +29,123 @@ from strategies import (buy_and_hold, cross_sectional_momentum,
                         bollinger_reversion, ma_cross, vol_target_scale)
 import performance as perf
 
-st.set_page_config(page_title="量化交易策略回测系统", page_icon="📈", layout="wide")
+st.set_page_config(page_title="量化交易策略回测系统", page_icon="📈",
+                   layout="wide", initial_sidebar_state="expanded")
+
+# ============================ 视觉主题 ============================
+st.markdown("""
+<style>
+:root{
+  --navy:#0B1F3A; --blue:#155EEF; --ink:#1B2A41; --muted:#5B6B84;
+  --line:#E4EAF2; --card:#FFFFFF; --bg:#F4F7FB;
+}
+html, body, [class*="css"]{
+  font-family:"Segoe UI","Microsoft YaHei UI","Microsoft YaHei",sans-serif;
+  color:var(--ink);
+}
+#MainMenu, footer {visibility:hidden;}
+[data-testid="stHeader"]{background:transparent;}
+[data-testid="stAppViewContainer"]{background:var(--bg);}
+section.main > div.block-container{padding:1.1rem 1.2rem 3rem; max-width:1260px;}
+
+/* ---------- 侧边栏：深海军蓝 ---------- */
+[data-testid="stSidebar"]{
+  background:linear-gradient(180deg,#0B1B33 0%,#102A50 100%);
+  border-right:none;
+}
+[data-testid="stSidebar"] *{color:#E8EEF7;}
+[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p{color:#C9D7EE; font-size:13px;}
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"] p{color:#8FA3C2;}
+[data-testid="stSidebar"] h3{color:#FFFFFF; letter-spacing:.5px;}
+[data-testid="stSidebar"] h1{color:#FFFFFF;}
+[data-testid="stSidebar"] hr{border-color:rgba(255,255,255,.14); margin:10px 0;}
+[data-testid="stSidebar"] .stButton > button{
+  background:rgba(255,255,255,.07); color:#E8EEF7;
+  border:1px solid rgba(255,255,255,.22); border-radius:10px;
+}
+[data-testid="stSidebar"] .stButton > button:hover{
+  background:rgba(255,255,255,.16); border-color:rgba(255,255,255,.4);
+}
+[data-testid="stSidebar"] .stButton > button[kind="primary"]{
+  background:linear-gradient(135deg,#2F7BFF,#0B3FBF); border:none;
+  box-shadow:0 6px 18px rgba(21,94,239,.45); font-weight:700;
+}
+[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover{
+  transform:translateY(-1px); box-shadow:0 8px 22px rgba(21,94,239,.55);
+}
+[data-testid="stSidebar"] input, [data-testid="stSidebar"] textarea,
+[data-testid="stSidebar"] [data-testid="stDateInputField"] input,
+[data-testid="stSidebar"] [data-baseweb="input"] input,
+[data-testid="stSidebar"] [data-baseweb="input"] div{
+  color:#0B1F3A !important; font-weight:600;
+}
+[data-testid="stSidebar"] input, [data-testid="stSidebar"] textarea,
+[data-testid="stSidebar"] [data-baseweb="input"] *{
+  -webkit-text-fill-color:#0B1F3A !important;
+}
+[data-testid="stDateInput"] [contenteditable="true"],
+[data-testid="stDateInput"] span[data-type="year"],
+[data-testid="stDateInput"] span[data-type="month"],
+[data-testid="stDateInput"] span[data-type="day"]{
+  -webkit-text-fill-color:#0B1F3A !important; color:#0B1F3A !important; font-weight:600;
+}
+[data-testid="stSidebar"] label p{color:#D9E2F2 !important;}
+
+/* ---------- 主按钮（主区下载按钮） ---------- */
+.stButton > button{border-radius:10px; font-weight:600;}
+[data-testid="stBaseButton-secondary"]{
+  background:#FFFFFF; border:1px solid var(--line); color:var(--blue);
+}
+[data-testid="stBaseButton-secondary"]:hover{border-color:var(--blue);}
+
+/* ---------- 渐变主视觉横幅 ---------- */
+.hero{
+  background:linear-gradient(120deg,#0B1F3A 0%,#123B7A 55%,#155EEF 100%);
+  border-radius:18px; padding:24px 30px; color:#FFFFFF;
+  box-shadow:0 10px 30px rgba(11,31,58,.25); margin-bottom:18px;
+}
+.hero .t{font-size:26px; font-weight:800; letter-spacing:.5px;}
+.hero .s{color:#C9D9F5; font-size:13.5px; margin-top:7px;}
+.hero .chips{margin-top:12px;}
+.hero .chip{
+  display:inline-block; background:rgba(255,255,255,.14); border:1px solid rgba(255,255,255,.25);
+  border-radius:999px; padding:3px 12px; margin-right:8px; font-size:12px; color:#EAF1FF;
+}
+
+/* ---------- KPI 指标卡片 ---------- */
+[data-testid="stMetric"]{
+  background:var(--card); border:1px solid var(--line); border-radius:14px;
+  padding:12px 16px 10px; box-shadow:0 1px 4px rgba(16,42,83,.06);
+}
+[data-testid="stMetric"] [data-testid="stMetricLabel"] p{
+  font-size:12px; color:var(--muted); font-weight:600;
+}
+[data-testid="stMetric"] [data-testid="stMetricValue"]{
+  color:var(--navy); font-weight:800; font-size:25px; font-family:"Segoe UI",sans-serif;
+}
+
+/* ---------- 分段式标签页 ---------- */
+.stTabs [data-baseweb="tab-list"]{
+  gap:6px; background:#E9EEF5; padding:4px; border-radius:12px; border:none;
+}
+.stTabs [data-baseweb="tab"]{
+  border-radius:9px; padding:5px 18px; background:transparent;
+}
+.stTabs [data-baseweb="tab"]:hover{background:rgba(21,94,239,.08);}
+.stTabs [aria-selected="true"]{
+  background:#FFFFFF !important; box-shadow:0 1px 4px rgba(16,42,83,.14);
+}
+.stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"]{display:none;}
+
+/* ---------- 信息条 / 小标注 ---------- */
+[data-testid="stCaptionContainer"] p{color:var(--muted); font-size:12.5px;}
+.strip{
+  background:#EDF3FF; border:1px solid #D6E4FF; border-left:4px solid var(--blue);
+  border-radius:10px; padding:8px 14px; font-size:13px; color:#1B2A41; margin:2px 0 12px;
+}
+.err-tip{font-size:12.5px; color:var(--muted);}
+</style>
+""", unsafe_allow_html=True)
 
 KIND_CN = {"stock": "股票", "etf": "ETF", "index": "指数"}
 KIND_CHOICES = ["自动识别", "股票", "ETF", "指数"]
@@ -151,6 +268,11 @@ def fetch_name(code: str, kind: str) -> str:
 
 
 @st.cache_data(show_spinner="正在获取行情数据...")
+@st.cache_data(show_spinner="正在获取大盘指数...")
+def load_index_bench(code: str) -> pd.DataFrame:
+    return get_data(code, kind="index")
+
+
 def load_price(symbol: str, kind: str, refresh: bool = False) -> pd.DataFrame:
     return get_data(symbol, kind=kind, use_cache=not refresh)
 
@@ -254,108 +376,179 @@ def fmt_num(x, nd=2):
     return "—" if x is None or (isinstance(x, float) and np.isnan(x)) else f"{x:.{nd}f}"
 
 
+def plotly_nav(comp: pd.DataFrame, oos_ts, height=390):
+    """净值对比图（Plotly：策略+基准+大盘指数标尺）"""
+    style = {"策略净值": ("#155EEF", 2.3, None, "rgba(21,94,239,0.07)"),
+             "买入持有": ("#9AA7B8", 1.7, None, None),
+             "股票池等权持有": ("#9AA7B8", 1.7, None, None),
+             "沪深300指数": ("#F59E0B", 1.5, "dash", None),
+             "上证指数": ("#64748B", 1.5, "dash", None)}
+    fig = go.Figure()
+    order = [c for c in comp.columns if c != "策略净值"] + ["策略净值"]
+    for name in order:
+        color, width, dash, fill = style.get(name, ("#155EEF", 1.8, None, None))
+        tr = dict(x=comp.index, y=comp[name], name=name,
+                  line=dict(color=color, width=width),
+                  hovertemplate="%{y:.3f}<extra></extra>")
+        if dash:
+            tr["line"]["dash"] = dash
+        if fill:
+            tr["fill"] = "tozeroy"
+            tr["fillcolor"] = fill
+        fig.add_trace(go.Scatter(**tr))
+    if oos_ts is not None:
+        fig.add_vline(x=oos_ts.isoformat(), line_dash="dash", line_width=1.3,
+                      line_color="#8FA3C2",
+                      annotation_text=" 样本外起点", annotation_position="top",
+                      annotation_font=dict(color="#5B6B84", size=11))
+    fig.update_layout(
+        template="plotly_white", height=height, margin=dict(l=6, r=10, t=34, b=6),
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0, bgcolor="rgba(0,0,0,0)"),
+        xaxis=dict(gridcolor="#E7ECF3", title=None,
+                   rangeselector=dict(
+                       buttons=[dict(count=1, label="1年", step="year", stepmode="backward"),
+                                dict(count=3, label="3年", step="year", stepmode="backward"),
+                                dict(step="all", label="全部")],
+                       bgcolor="#FFFFFF", activecolor="#D6E4FF",
+                       bordercolor="#D6E4FF", font=dict(size=11))),
+        yaxis=dict(gridcolor="#E7ECF3", zerolinecolor="#D9E1EC", title="净值（期初=1）"),
+        font=dict(family="Segoe UI, Microsoft YaHei, sans-serif", size=12, color="#1B2A41"))
+    return fig
+
+
+def plotly_dd(nav: pd.Series, height=225):
+    dd = (nav / nav.cummax() - 1) * 100
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=dd.index, y=dd.values, name="回撤",
+                             line=dict(color="#DC2626", width=1.6),
+                             fill="tozeroy", fillcolor="rgba(220,38,38,0.16)",
+                             hovertemplate="%{y:.1f}%<extra></extra>"))
+    fig.update_layout(template="plotly_white", height=height,
+                      margin=dict(l=6, r=10, t=8, b=6), hovermode="x unified",
+                      xaxis=dict(gridcolor="#E7ECF3", title=None),
+                      yaxis=dict(gridcolor="#E7ECF3", title="回撤%", ticksuffix="%"),
+                      font=dict(family="Segoe UI, Microsoft YaHei, sans-serif", size=12,
+                                color="#1B2A41"), showlegend=False)
+    return fig
+
+
 # ---------------- 侧边栏：参数 ----------------
-st.sidebar.title("⚙️ 回测设置")
+with st.sidebar:
+    st.markdown("### ⚙️ 回测设置")
+    mode = st.radio("回测模式", ["单标的策略", "动量组合（自选股票池）"], horizontal=True,
+                    label_visibility="collapsed")
 
-mode = st.sidebar.radio("回测模式", ["单标的策略", "动量组合（自选股票池）"], horizontal=True)
-
-if mode == "单标的策略":
-    c1, c2 = st.sidebar.columns([1.2, 1])
-    code = c1.text_input("证券代码（6位）", value="510300", key="code_input",
-                         help="示例：600519贵州茅台、510300沪深300ETF；指数（如000300上证指数、399006创业板指）请把类型选为“指数”")
-    kind_choice = c2.selectbox("品种类型", KIND_CHOICES, key="kind_choice")
-    code = code.strip()
-    st.sidebar.button("⭐ 加入自选", on_click=cb_add_watchlist, use_container_width=True)
-    if not CODE_RE.match(code):
-        st.sidebar.error("请输入6位数字代码，例如 600519")
-        st.stop()
-    kind = infer_kind(code, kind_choice)
-    strategy = st.sidebar.selectbox("选择策略", ["双均线趋势跟踪", "布林带均值回归", "买入持有基准"])
-    if strategy == "双均线趋势跟踪":
-        c1, c2 = st.sidebar.columns(2)
-        fast = c1.slider("短期均线", 3, 30, 5)
-        slow = c2.slider("长期均线", 10, 120, 20)
-        if fast >= slow:
-            st.sidebar.warning("短期均线应小于长期均线，已自动调整")
-            fast, slow = min(fast, slow - 1), slow
-        params = (fast, slow)
-        st.sidebar.caption(f"当前参数：MA{fast} / MA{slow}，金叉买入、死叉卖出")
-    elif strategy == "布林带均值回归":
-        n = st.sidebar.slider("均线周期N", 10, 60, 20)
-        k = st.sidebar.slider("标准差倍数K", 1.0, 3.0, 2.0, 0.1)
-        params = (n, k)
-        st.sidebar.caption(f"当前参数：布林带({n}, {k}σ)，跌破下轨买入、回升中轨卖出")
+    if mode == "单标的策略":
+        c1, c2 = st.columns([1.2, 1])
+        code = c1.text_input("证券代码（6位）", value="510300", key="code_input",
+                             help="示例：600519贵州茅台、510300沪深300ETF；指数（如000300上证指数、399006创业板指）请把类型选为“指数”")
+        kind_choice = c2.selectbox("品种类型", KIND_CHOICES, key="kind_choice")
+        code = code.strip()
+        st.button("⭐ 加入自选", on_click=cb_add_watchlist, use_container_width=True)
+        if not CODE_RE.match(code):
+            st.error("请输入6位数字代码，例如 600519")
+            st.stop()
+        kind = infer_kind(code, kind_choice)
+        strategy = st.selectbox("选择策略", ["双均线趋势跟踪", "布林带均值回归", "买入持有基准"])
+        if strategy == "双均线趋势跟踪":
+            c1, c2 = st.columns(2)
+            fast = c1.slider("短期均线", 3, 30, 5)
+            slow = c2.slider("长期均线", 10, 120, 20)
+            if fast >= slow:
+                st.warning("短期均线应小于长期均线，已自动调整")
+                fast, slow = min(fast, slow - 1), slow
+            params = (fast, slow)
+            st.caption(f"当前参数：MA{fast} / MA{slow}，金叉买入、死叉卖出")
+        elif strategy == "布林带均值回归":
+            n = st.slider("均线周期N", 10, 60, 20)
+            k = st.slider("标准差倍数K", 1.0, 3.0, 2.0, 0.1)
+            params = (n, k)
+            st.caption(f"当前参数：布林带({n}, {k}σ)，跌破下轨买入、回升中轨卖出")
+        else:
+            params = ()
     else:
-        params = ()
-else:
-    code, kind = None, None
-    strategy = "横截面动量"
-    pool_text = st.sidebar.text_area("股票池代码（6位，空格/逗号分隔）", value=DEFAULT_POOL,
-                                     key="pool_text",
-                                     help="可输入任意A股代码，获取失败的标的将被自动跳过；建议至少5只")
-    c1, c2 = st.sidebar.columns(2)
-    lookback = c1.slider("动量回看期", 10, 60, 20)
-    top = c2.slider("持有只数", 1, 5, 3)
-    params = (lookback, top)
-    st.sidebar.caption(f"每月末按过去{lookback}日收益排序，等权持有最强{top}只")
+        code, kind = None, None
+        strategy = "横截面动量"
+        pool_text = st.text_area("股票池代码（6位，空格/逗号分隔）", value=DEFAULT_POOL,
+                                 key="pool_text",
+                                 help="可输入任意A股代码，获取失败的标的将被自动跳过；建议至少5只")
+        c1, c2 = st.columns(2)
+        lookback = c1.slider("动量回看期", 10, 60, 20)
+        top = c2.slider("持有只数", 1, 5, 3)
+        params = (lookback, top)
+        st.caption(f"每月末按过去{lookback}日收益排序，等权持有最强{top}只")
 
-# ---------------- 仓位控制（两种模式通用） ----------------
-vol_on = st.sidebar.checkbox("启用波动率目标仓位", value=False,
-                             help="仓位系数=目标年化波动率÷近20日实际波动率（按0.1步长分档、上限100%）；波动放大时自动减仓。"
-                                  "动量组合以股票池等权组合的波动率作为整体风险估计")
-target_vol = 0.15
-if vol_on:
-    target_vol = st.sidebar.slider("目标年化波动率", 0.05, 0.40, 0.15, 0.01)
-    st.sidebar.caption(f"仓位系数 = {target_vol:.0%} ÷ 近20日实际波动率，按0.1步长分档")
+    st.divider()
+    st.markdown("#### 🎯 仓位控制")
+    vol_on = st.checkbox("启用波动率目标仓位", value=False,
+                         help="仓位系数=目标年化波动率÷近20日实际波动率（按0.1步长分档、上限100%）；波动放大时自动减仓。"
+                              "动量组合以股票池等权组合的波动率作为整体风险估计")
+    target_vol = 0.15
+    if vol_on:
+        target_vol = st.slider("目标年化波动率", 0.05, 0.40, 0.15, 0.01)
+        st.caption(f"仓位系数 = {target_vol:.0%} ÷ 近20日实际波动率，按0.1步长分档")
 
-# ---------------- 自选股 ----------------
-st.sidebar.subheader("⭐ 自选股")
-if not st.session_state.watchlist:
-    st.sidebar.caption("暂无自选。单标的模式下点击「⭐ 加入自选」可收藏常用标的。")
-for i, it in enumerate(st.session_state.watchlist):
-    c1, c2, c3 = st.sidebar.columns([3.2, 1, 1])
-    c1.caption(f"{it['name'][:8]}({it['code']})")
-    c2.button("用", key=f"wl_use_{it['code']}", on_click=cb_use_code,
-              args=(it["code"],), use_container_width=True)
-    c3.button("✕", key=f"wl_del_{it['code']}", on_click=cb_remove_watchlist,
-              args=(it["code"],), use_container_width=True)
-if st.session_state.watchlist and mode == "动量组合（自选股票池）":
-    st.sidebar.button("⬇ 填充到股票池", key="wl_fill", on_click=cb_fill_pool,
-                      use_container_width=True)
-if st.session_state.get("watchlist_msg"):
-    st.sidebar.caption(st.session_state.watchlist_msg)
+    st.divider()
+    st.markdown("#### 💹 交易成本与资金")
+    commission = st.slider("佣金率（‱，双边）", 0.0, 10.0, 2.5, 0.5) / 10000
+    stamp = st.slider("印花税率（‱，卖出）", 0.0, 20.0, 5.0, 0.5) / 10000
+    slippage = st.slider("滑点（‱，单边）", 0.0, 20.0, 10.0, 0.5) / 10000
+    cash0 = st.select_slider("初始资金（元）", [100_000, 500_000, 1_000_000, 5_000_000],
+                             value=1_000_000)
 
-st.sidebar.divider()
-st.sidebar.subheader("交易成本与资金")
-commission = st.sidebar.slider("佣金率（‱，双边）", 0.0, 10.0, 2.5, 0.5) / 10000
-stamp = st.sidebar.slider("印花税率（‱，卖出）", 0.0, 20.0, 5.0, 0.5) / 10000
-slippage = st.sidebar.slider("滑点（‱，单边）", 0.0, 20.0, 10.0, 0.5) / 10000
-cash0 = st.sidebar.select_slider("初始资金（元）", [100_000, 500_000, 1_000_000, 5_000_000],
-                                 value=1_000_000)
+    st.markdown("#### 📅 回测区间")
+    c1, c2 = st.columns(2)
+    start_date = c1.date_input("开始", dt.date(2019, 1, 2),
+                               min_value=dt.date(2015, 1, 1), max_value=dt.date.today())
+    end_date = c2.date_input("结束", dt.date.today(),
+                             min_value=dt.date(2015, 1, 1), max_value=dt.date.today())
+    oos_date = st.date_input("样本外起点（IS/OOS分界）", dt.date(2024, 1, 1),
+                             min_value=dt.date(2015, 1, 1), max_value=dt.date.today())
+    refresh = st.checkbox("强制刷新行情", value=False,
+                          help="勾选后忽略本地缓存，重新联网下载该代码的最新日线数据")
+    show_index = st.checkbox("对比大盘指数（沪深300 / 上证指数）", value=True,
+                            help="在净值图中叠加大盘指数标尺（价格指数口径，不含股息），并计入绩效分段表")
 
-st.sidebar.subheader("回测区间")
-c1, c2 = st.sidebar.columns(2)
-start_date = c1.date_input("开始", dt.date(2019, 1, 2),
-                           min_value=dt.date(2015, 1, 1), max_value=dt.date.today())
-end_date = c2.date_input("结束", dt.date.today(),
-                         min_value=dt.date(2015, 1, 1), max_value=dt.date.today())
-oos_date = st.sidebar.date_input("样本外起点（IS/OOS分界）", dt.date(2024, 1, 1),
-                                 min_value=dt.date(2015, 1, 1), max_value=dt.date.today())
-refresh = st.sidebar.checkbox("强制刷新行情", value=False,
-                              help="勾选后忽略本地缓存，重新联网下载该代码的最新日线数据")
+    run_clicked = st.button("🚀 运行回测", type="primary", use_container_width=True)
+    st.divider()
+    st.caption("撮合规则：T日收盘产生信号，T+1日开盘价成交；成本含佣金（最低5元）、"
+               "印花税与滑点；不支持杠杆与做空。")
 
-run_clicked = st.sidebar.button("🚀 运行回测", type="primary", use_container_width=True)
-st.sidebar.divider()
-st.sidebar.caption("撮合规则：T日收盘产生信号，T+1日开盘价成交；"
-                   "成本含佣金（最低5元）、印花税与滑点；不支持杠杆与做空。")
+# ---------------- 自选股（侧边栏） ----------------
+with st.sidebar:
+    st.markdown("### ⭐ 自选股")
+    if not st.session_state.watchlist:
+        st.caption("暂无自选。单标的模式下点击「⭐ 加入自选」可收藏常用标的。")
+    for i, it in enumerate(st.session_state.watchlist):
+        c1, c2, c3 = st.columns([3.2, 1, 1])
+        c1.caption(f"{it['name'][:8]}({it['code']})")
+        c2.button("用", key=f"wl_use_{it['code']}", on_click=cb_use_code,
+                  args=(it["code"],), use_container_width=True)
+        c3.button("✕", key=f"wl_del_{it['code']}", on_click=cb_remove_watchlist,
+                  args=(it["code"],), use_container_width=True)
+    if st.session_state.watchlist and mode == "动量组合（自选股票池）":
+        st.button("⬇ 填充到股票池", key="wl_fill", on_click=cb_fill_pool,
+                  use_container_width=True)
+    if st.session_state.get("watchlist_msg"):
+        st.caption(st.session_state.watchlist_msg)
 
 # ---------------- 主区域 ----------------
-st.title("📈 基于Python的量化交易策略回测系统")
-st.caption("华南理工大学辅修学士学位毕业设计 · 数据层—引擎层—策略层—评估层 · "
-           "支持任意A股代码按需获取")
+st.markdown("""
+<div class="hero">
+  <div class="t">📈 量化交易策略回测系统</div>
+  <div class="s">华南理工大学辅修学士学位毕业设计 · 数据层 — 引擎层 — 策略层 — 评估层</div>
+  <div class="chips">
+    <span class="chip">任意A股代码按需获取</span>
+    <span class="chip">T+1 开盘撮合 · 显式成本</span>
+    <span class="chip">波动率目标仓位</span>
+    <span class="chip">自选股管理</span>
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
 if not run_clicked:
-    st.info("请在左侧设置参数后，点击「🚀 运行回测」。输入任意6位A股代码即可联网获取行情。")
+    st.info("👈 请在左侧设置参数后，点击「🚀 运行回测」。输入任意6位A股代码即可联网获取行情。")
     st.stop()
 
 try:
@@ -363,7 +556,7 @@ try:
         res = run_backtest(code, kind, strategy, params, commission, stamp,
                            slippage, float(cash0), str(start_date), str(end_date),
                            refresh, vol_on, target_vol)
-        name = fetch_name(code, kind) if not refresh else fetch_name(code, kind)
+        name = fetch_name(code, kind)
         title_asset = f"{name}({code})｜{KIND_CN[kind]}"
         if vol_on:
             title_asset += f"｜波动率目标{target_vol:.0%}"
@@ -376,29 +569,49 @@ try:
             title_asset += f"｜波动率目标{target_vol:.0%}"
 except Exception as e:
     st.error(f"回测失败：{e}")
-    st.caption("提示：请检查证券代码是否正确；指数代码（如000300、399006）需把品种类型选为“指数”；"
-               "新代码首次获取需要联网，约需数秒。")
+    st.markdown('<p class="err-tip">提示：请检查证券代码是否正确；指数代码（如000300、399006）'
+                '需把品种类型选为“指数”；新代码首次获取需要联网，约需数秒。</p>',
+                unsafe_allow_html=True)
     st.stop()
 
 nav = res["nav"].dropna()
 bench_nav = res["bench"]["nav"].reindex(nav.index).dropna()
 bench_label = "买入持有" if mode == "单标的策略" else "股票池等权持有"
+idx_close = {}
+if show_index:
+    for ic, iname in [("000300", "沪深300指数"), ("000001", "上证指数")]:
+        try:
+            s = load_index_bench(ic)["close"].reindex(nav.index).dropna()
+            if len(s) > 60:
+                idx_close[iname] = s / s.iloc[0]
+        except Exception as _e:
+            print(f"[IDX-ERR] {ic} {iname}: {repr(_e)[:200]}", flush=True)
+        else:
+            _s0 = load_index_bench(ic)["close"]
+            print(f"[IDX-OK] {ic}: rows={len(_s0)} idxtype={type(_s0.index[0])} "
+                  f"first={_s0.index[0]} navfirst={nav.index[0]} navlast={nav.index[-1]}", flush=True)
 oos_ts = pd.Timestamp(oos_date) if start_date < oos_date < end_date else None
 
-st.caption(f"标的：{title_asset}｜实际区间：{res['actual_start'].date()} ~ "
-           f"{res['actual_end'].date()}（{res['n_days']}个交易日）"
-           + (f"｜跳过无法获取：{'、'.join(res['skipped'])}" if res.get("skipped") else ""))
+st.markdown(f'<div class="strip">标的：<b>{title_asset}</b>　·　实际区间：'
+            f'{res["actual_start"].date()} ~ {res["actual_end"].date()}'
+            f'（{res["n_days"]}个交易日）'
+            + (f'　·　跳过无法获取：{"、".join(res["skipped"])}' if res.get("skipped") else "")
+            + "</div>", unsafe_allow_html=True)
 
 # 指标卡片
 stats_all = perf.segment_stats(nav)
 stats_oos = (perf.segment_stats(nav.loc[oos_ts:]) if oos_ts else None)
 cols = st.columns(6)
-cols[0].metric("全样本年化收益", fmt_pct(stats_all.get("年化收益率")))
-cols[1].metric("样本外年化收益", fmt_pct(stats_oos.get("年化收益率")) if stats_oos else "—")
-cols[2].metric("全样本夏普比率", fmt_num(stats_all.get("夏普比率")))
-cols[3].metric("最大回撤", fmt_pct(stats_all.get("最大回撤")))
-cols[4].metric("年化换手率", f"{res['annual_turnover']:.1f} 倍")
-cols[5].metric("总交易成本", f"{res['total_cost']:,.0f} 元")
+kpi = [
+    ("全样本年化收益", fmt_pct(stats_all.get("年化收益率"))),
+    ("样本外年化收益", fmt_pct(stats_oos.get("年化收益率")) if stats_oos else "—"),
+    ("全样本夏普比率", fmt_num(stats_all.get("夏普比率"))),
+    ("最大回撤", fmt_pct(stats_all.get("最大回撤"))),
+    ("年化换手率", f"{res['annual_turnover']:.1f} 倍"),
+    ("总交易成本", f"{res['total_cost']:,.0f} 元"),
+]
+for c, (label, value) in zip(cols, kpi):
+    c.metric(label, value)
 
 st.divider()
 
@@ -406,16 +619,18 @@ st.divider()
 tab1, tab2, tab3, tab4 = st.tabs(["📊 净值与回撤", "🧾 交易明细", "📋 绩效分段表", "⬇️ 数据导出"])
 
 with tab1:
-    st.caption(("归一化净值（期初=1）。样本外起点：%s。" % oos_date) if oos_ts
+    st.caption(("归一化净值（期初=1）。虚线为样本外起点：%s。" % oos_date) if oos_ts
                else "归一化净值（期初=1）。")
     comp = pd.DataFrame({
         "策略净值": nav / nav.iloc[0],
         bench_label: bench_nav / bench_nav.iloc[0],
     })
-    st.line_chart(comp, height=320)
+    comp = pd.concat([comp, pd.DataFrame(idx_close)], axis=1)
+    st.plotly_chart(plotly_nav(comp, oos_ts), use_container_width=True,
+                    config={"displayModeBar": False})
     st.caption("策略回撤曲线（净值相对历史新高的跌幅）。")
-    dd = (nav / nav.cummax() - 1)
-    st.area_chart(dd, height=220)
+    st.plotly_chart(plotly_dd(nav), use_container_width=True,
+                    config={"displayModeBar": False})
 
 with tab2:
     trades = res["trades"].copy()
@@ -445,6 +660,15 @@ with tab3:
                  "Calmar比率": fmt_num(bench_stats.get("Calmar比率")),
                  "日胜率": fmt_pct(bench_stats.get("日胜率"))})
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    for iname, s_norm in idx_close.items():
+        bs = perf.segment_stats(s_norm)
+        rows.append({"区间": f"大盘标尺：{iname}(全样本)", "累计收益率": fmt_pct(bs.get("累计收益率")),
+                     "年化收益率": fmt_pct(bs.get("年化收益率")),
+                     "年化波动率": fmt_pct(bs.get("年化波动率")),
+                     "夏普比率": fmt_num(bs.get("夏普比率")),
+                     "最大回撤": fmt_pct(bs.get("最大回撤")),
+                     "Calmar比率": fmt_num(bs.get("Calmar比率")),
+                     "日胜率": fmt_pct(bs.get("日胜率"))})
     st.caption(f"当前设置：{title_asset}｜{strategy}｜无风险利率取0，一年按252个交易日计。")
 
 with tab4:
